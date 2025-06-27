@@ -97,12 +97,24 @@ pub(crate) fn despawn_confirmed(
     query: Query<&Confirmed>,
     mut commands: Commands,
 ) -> Result {
+    let confirmed_entity = trigger.target();
+    info!("Confirmed removed from {:?}", confirmed_entity);
+
     if let Ok(confirmed) = query.get(trigger.target()) {
+        info!("Confirmed.predicted {:?}", confirmed.predicted);
+        
         if let Some(predicted) = confirmed.predicted {
             if let Ok(mut entity_mut) = commands.get_entity(predicted) {
+                info!("Despawning predicted entity {:?}", predicted);
                 entity_mut.try_despawn();
+            } else {
+                info!("Could not find predicted entity {:?}", predicted);
             }
+        } else {
+            info!("Confirmed.predicted was None");
         }
+    } else {
+        info!("Confirmed entity {:?} not found in query", confirmed_entity);
     }
     Ok(())
 }
