@@ -222,21 +222,14 @@ impl AuthorityPlugin {
         state: &mut Option<Mut<ReplicationState>>,
         sender: Entity,
         commands: &mut EntityCommands,
-        #[cfg(feature="interpolation")] has_interp: bool,
-        #[cfg(feature="prediction")] has_pred: bool,
     ) {
         match state {
             None => {
-                let mut rs = ReplicationState::default();
-                let mut ps = PerSenderReplicationState::new(Some(add));
-
-                #[cfg(feature="interpolation")]
-                if has_interp { ps.interpolated = true; }
-                #[cfg(feature="prediction")]
-                if has_pred { ps.predicted = true; }
-
-                rs.per_sender_state.insert(sender, ps);
-                commands.insert(rs);
+                let mut state = ReplicationState::default();
+                state
+                    .per_sender_state
+                    .insert(sender, PerSenderReplicationState::new(Some(add)));
+                commands.insert(state);
             }
             Some(state) => {
                 if add {
