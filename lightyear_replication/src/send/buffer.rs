@@ -362,6 +362,18 @@ pub(crate) fn replicate_entity(
 
     // b. add entity despawns from Visibility lost
     if state_metadata.lost_visibility {
+        let ly_vis_spawned_prev = state
+            .get(&sender_entity)
+            .map(|s| s.spawned)
+            .unwrap_or(false);
+
+        info!(
+            "LY_VIS: buffering DESPAWN e={:?} sender={:?} spawned_prev={}",
+            entity,
+            sender_entity,
+            ly_vis_spawned_prev
+        );
+
         replicate_entity_despawn(entity, group_id, entity_mapper, sender, sender_entity);
     }
 
@@ -374,6 +386,11 @@ pub(crate) fn replicate_entity(
 
     // c. add entity spawns for Replicate changing
     if state_metadata.should_spawn {
+        let ly_vis_spawned_prev = state
+            .get(&sender_entity)
+            .map(|s| s.spawned)
+            .unwrap_or(false);
+
         replicate_entity_spawn(
             entity,
             group_id,
@@ -384,6 +401,7 @@ pub(crate) fn replicate_entity(
             component_registry,
             sender,
             sender_entity,
+            ly_vis_spawned_prev, // ✅ new arg
         );
     }
 
@@ -523,6 +541,9 @@ pub(crate) fn replicate_entity_spawn(
     component_registry: &ComponentRegistry,
     sender: &mut ReplicationSender,
     sender_entity: Entity,
+
+    // ✅ add this
+    ly_vis_spawned_prev: bool,
 ) {
     info!(
         ?entity,
@@ -530,27 +551,18 @@ pub(crate) fn replicate_entity_spawn(
         ?group_id,
         predicted = state.predicted,
         interpolated = state.interpolated,
+        spawned_prev = ly_vis_spawned_prev,
         "LY_VIS: buffering SPAWN"
     );
 
-    let bits = entity.to_bits();
-    let idx = entity.index_u32();
-    let generation = entity.generation().to_bits();
-
-    info!(
-      "LY_VIS: spawn entity={:?} idx={} gen={} bits={} group={:?}",
-      entity, idx, generation, bits, group_id
-    );
-
-
-    // mark that this entity has been spawned to this sender!
+    // (keep the rest exactly as-is)
     sender.new_spawns.push(entity);
-    debug!(?entity, ?group_id, ?state, "Sending Spawn");
+
     #[cfg(feature = "interpolation")]
     if state.interpolated {
-        // if the entity is interpolated, we don't want to Prespawn it
         prespawned = None;
     }
+
     sender.prepare_entity_spawn(
         entity,
         group_id,
@@ -561,12 +573,14 @@ pub(crate) fn replicate_entity_spawn(
         state.interpolated,
         prespawned,
     );
+
     if controlled_by.is_some_and(|c| c.owner == sender_entity) {
         sender
             .prepare_typed_component_insert(entity, group_id, component_registry, &Controlled)
             .unwrap();
     }
 }
+
 
 /// Buffer entity despawn if an entity had [`Replicating`] and either:
 /// - the [`Replicate`]/[`ReplicationState`] component is removed
