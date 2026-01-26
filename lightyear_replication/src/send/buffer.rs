@@ -533,6 +533,16 @@ pub(crate) fn replicate_entity_spawn(
         "LY_VIS: buffering SPAWN"
     );
 
+    let bits = entity.to_bits();
+    let idx = entity.index_u32();
+    let generation = entity.generation().to_bits();
+
+    info!(
+      "LY_VIS: spawn entity={:?} idx={} gen={} bits={} group={:?}",
+      entity, idx, generation, bits, group_id
+    );
+
+
     // mark that this entity has been spawned to this sender!
     sender.new_spawns.push(entity);
     debug!(?entity, ?group_id, ?state, "Sending Spawn");
