@@ -360,6 +360,21 @@ pub(crate) fn replicate_entity(
         }
     };
 
+    let has_interp_component = entity_ref.contains::<InterpolationTarget>();
+
+    #[cfg(feature = "interpolation")]
+    if has_interp_component && !state_metadata.interpolated {
+        info!(
+        "LY_VIS_INTERP_MISMATCH: e={:?} sender={:?} has_InterpolationTarget=true but state_metadata.interpolated=false \
+         (state.interpolated={}, visibility={:?}, spawned={})",
+        entity,
+        sender_entity,
+        state.interpolated,
+        state.visibility,
+        state.spawned,
+    );
+    }
+
     // b. add entity despawns from Visibility lost
     if state_metadata.lost_visibility {
         let ly_vis_spawned_prev = state.spawned;
