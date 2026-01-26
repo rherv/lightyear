@@ -236,7 +236,8 @@ impl ReplicationGroup {
     pub fn group_id(&self, entity: Option<Entity>) -> ReplicationGroupId {
         match self.id_builder {
             ReplicationGroupIdBuilder::FromEntity => {
-                ReplicationGroupId(entity.expect("need to provide an entity").to_bits())
+                let e = entity.unwrap();
+                ReplicationGroupId(((e.generation().to_bits() as u64) << 32) | (e.index_u32() as u64))
             }
             ReplicationGroupIdBuilder::Group(id) => ReplicationGroupId(id),
         }
