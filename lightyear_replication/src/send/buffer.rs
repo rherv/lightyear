@@ -163,6 +163,7 @@ pub(crate) fn replicate(
                 if let Ok(mut state) = query.p1().get_mut(e)
                     && let Some(s) = state.per_sender_state.get_mut(&sender_entity)
                 {
+                    info!(?e, ?sender_entity, "LY_VIS: marking spawned=true (buffered)");
                     s.spawned = true;
                 }
             })
