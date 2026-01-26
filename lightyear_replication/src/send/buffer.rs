@@ -489,6 +489,13 @@ pub(crate) fn replicate_entity_despawn(
     sender: &mut ReplicationSender,
     sender_entity: Entity,
 ) {
+    info!(
+        ?entity,
+        ?sender_entity,
+        ?group_id,
+        "LY_VIS: buffering DESPAWN (lost visibility)"
+    );
+
     debug!(
         ?entity,
         ?sender_entity,
@@ -516,6 +523,15 @@ pub(crate) fn replicate_entity_spawn(
     sender: &mut ReplicationSender,
     sender_entity: Entity,
 ) {
+    info!(
+        ?entity,
+        ?sender_entity,
+        ?group_id,
+        predicted = state.predicted,
+        interpolated = state.interpolated,
+        "LY_VIS: buffering SPAWN"
+    );
+
     // mark that this entity has been spawned to this sender!
     sender.new_spawns.push(entity);
     debug!(?entity, ?group_id, ?state, "Sending Spawn");
