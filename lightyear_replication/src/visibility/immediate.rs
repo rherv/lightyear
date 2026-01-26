@@ -116,7 +116,14 @@ impl NetworkVisibilityPlugin {
                 //  The issue is that keeping the data around forever could be expensive...
                 // discard these entities since we already sent a despawn message for it
                 if state.visibility == VisibilityState::Lost {
-                    return false;
+                    // We already sent DESPAWN, but keep the entry so we don't lose metadata
+                    // like predicted/interpolated (and authority).
+                    state.visibility = VisibilityState::Default;
+
+                    // Important: we want a future gain_visibility() to cause a SPAWN again.
+                    state.spawned = false;
+
+                    return true;
                 }
                 true
             })
