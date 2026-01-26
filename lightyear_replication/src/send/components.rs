@@ -1084,24 +1084,33 @@ impl Replicate {
             state: &mut Mut<ReplicationState>,
             entity: Entity,
             sender_entity: Entity,
-            _: &mut Commands,
+            commands: &mut Commands,
         ) {
             state
                 .per_sender_state
                 .entry(sender_entity)
-                .and_modify(|s| s.predicted = true);
+                .or_insert_with(|| {
+                    commands.entity(entity).insert_if_new(HasAuthority);
+                    PerSenderReplicationState::with_authority()
+                })
+                .predicted = true;
         }
         #[cfg(feature = "interpolation")]
         fn update_interpolation(
             state: &mut Mut<ReplicationState>,
             entity: Entity,
             sender_entity: Entity,
-            _: &mut Commands,
+            commands: &mut Commands,
         ) {
             state
                 .per_sender_state
                 .entry(sender_entity)
-                .and_modify(|s| s.interpolated = true);
+                .or_insert_with(|| {
+                    // Same behavior as update_replicate: ensure authority bookkeeping exists
+                    commands.entity(entity).insert_if_new(HasAuthority);
+                    PerSenderReplicationState::with_authority()
+                })
+                .interpolated = true;
         }
 
         if let Ok((sender_entity, remote_peer_id, _client, client_of)) =
