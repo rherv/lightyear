@@ -328,10 +328,12 @@ pub(crate) fn replicate_entity(
             },
             #[cfg(feature = "interpolation")]
             interpolated: if c.contains::<InterpolationTarget>() {
-                child_state.is_some_and(|c| c.interpolated)
+                // If the child has InterpolationTarget but does NOT have a per-sender entry,
+                // treat it as inheriting from root (or at least do not force false).
+                child_state.map(|s| s.interpolated).unwrap_or(state.interpolated)
             } else {
                 state.interpolated
-            },
+            }
         }
     } else {
         if state.authority.is_none_or(|a| !a) {
