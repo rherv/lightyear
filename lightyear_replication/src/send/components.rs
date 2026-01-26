@@ -828,6 +828,10 @@ impl Replicate {
             let mut add_host_client = None;
             let mut add_authority = false;
 
+            #[cfg(feature = "interpolation")]
+            let has_interp = entity_mut.contains::<InterpolationTarget>();
+            #[cfg(feature = "prediction")]
+            let has_pred = entity_mut.contains::<PredictionTarget>();
 
             let mut add_sender = |senders: &mut EntityIndexMap<PerSenderReplicationState>, sender_entity: Entity, is_host_client: bool| {
                 if is_host_client {
@@ -847,7 +851,20 @@ impl Replicate {
                     .or_insert_with(|| {
                         trace!("Adding {sender_entity:?} to list of senders for entity {:?} because Replicate is inserted", context.entity);
                         add_authority = true;
-                        PerSenderReplicationState::with_authority()
+
+                        let mut s = PerSenderReplicationState::with_authority();
+
+                        #[cfg(feature = "interpolation")]
+                        if has_interp {
+                            s.interpolated = true;
+                        }
+
+                        #[cfg(feature = "prediction")]
+                        if has_pred {
+                            s.predicted = true;
+                        }
+
+                        s
                     });
             };
 
