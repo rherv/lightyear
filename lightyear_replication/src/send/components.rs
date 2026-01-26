@@ -843,7 +843,17 @@ impl Replicate {
                 senders.entry(sender_entity)
                     .and_modify(|s| {
                         s.to_remove = false;
-                        // authority could be set to None (for example if PredictionTarget is processed first)
+
+                        // If entry already exists, make sure flags match components
+                        #[cfg(feature = "interpolation")]
+                        if has_interp {
+                            s.interpolated = true;
+                        }
+                        #[cfg(feature = "prediction")]
+                        if has_pred {
+                            s.predicted = true;
+                        }
+
                         if s.authority.is_none() {
                             add_authority = true;
                         }
