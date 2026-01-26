@@ -362,10 +362,7 @@ pub(crate) fn replicate_entity(
 
     // b. add entity despawns from Visibility lost
     if state_metadata.lost_visibility {
-        let ly_vis_spawned_prev = state
-            .get(&sender_entity)
-            .map(|s| s.spawned)
-            .unwrap_or(false);
+        let ly_vis_spawned_prev = state.spawned;
 
         info!(
             "LY_VIS: buffering DESPAWN e={:?} sender={:?} spawned_prev={}",
@@ -386,10 +383,7 @@ pub(crate) fn replicate_entity(
 
     // c. add entity spawns for Replicate changing
     if state_metadata.should_spawn {
-        let ly_vis_spawned_prev = state
-            .get(&sender_entity)
-            .map(|s| s.spawned)
-            .unwrap_or(false);
+        let ly_vis_spawned_prev = state.spawned;
 
         replicate_entity_spawn(
             entity,
