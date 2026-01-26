@@ -813,6 +813,11 @@ impl Replicate {
             let world = unsafe { unsafe_world.world_mut() };
             let mut entity_mut = unsafe { unsafe_world.world_mut() }.entity_mut(context.entity);
 
+            #[cfg(feature = "interpolation")]
+            let has_interp = entity_mut.contains::<InterpolationTarget>();
+            #[cfg(feature = "prediction")]
+            let has_pred = entity_mut.contains::<PredictionTarget>();
+
             // SAFETY: there is no aliasing because the `entity_mut_state` is used to get these 4 components
             //  and `entity_mut` is used to insert some extra components
             let Ok((mut state, replicate, group)) = (unsafe {
@@ -827,11 +832,6 @@ impl Replicate {
             // to another archetype
             let mut add_host_client = None;
             let mut add_authority = false;
-
-            #[cfg(feature = "interpolation")]
-            let has_interp = entity_mut.contains::<InterpolationTarget>();
-            #[cfg(feature = "prediction")]
-            let has_pred = entity_mut.contains::<PredictionTarget>();
 
             let mut add_sender = |senders: &mut EntityIndexMap<PerSenderReplicationState>, sender_entity: Entity, is_host_client: bool| {
                 if is_host_client {
