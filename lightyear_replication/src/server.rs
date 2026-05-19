@@ -17,9 +17,9 @@ use lightyear_transport::plugin::TransportSystems;
 use lightyear_transport::prelude::Transport;
 
 use crate::channels::RepliconChannelMap;
-use crate::checkpoint::wrap_server_payload;
+use crate::checkpoint::{WRAPPED_SERVER_PAYLOAD_HEADER_LEN, wrap_server_payload};
 use lightyear_messages::plugin::MessageSystems;
-use tracing::trace;
+use tracing::{error, trace};
 
 /// Adds the replicon server-side backend bridge for lightyear.
 ///
@@ -138,6 +138,21 @@ fn send_server_packets(
 ) {
     for (client, channel_idx, message) in server_messages.drain_sent() {
         let (channel_kind, _) = channel_map.server_channels[channel_idx];
+        if matches!(channel_idx, 0 | 1)
+            && message.len() + WRAPPED_SERVER_PAYLOAD_HEADER_LEN
+                > lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE
+        {
+            error!(
+                channel_idx,
+                client = ?client,
+                inner_len = message.len(),
+                wrapper_len = WRAPPED_SERVER_PAYLOAD_HEADER_LEN,
+                wrapped_len = message.len() + WRAPPED_SERVER_PAYLOAD_HEADER_LEN,
+                max_packet_size = lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE,
+                "dropping wrapped replicon payload that exceeds packet budget"
+            );
+            continue;
+        }
         let message = match channel_idx {
             // Replicon channels 0/1 feed ConfirmHistory / ServerMutateTicks on the client.
             // Prefix them with the authoritative server Lightyear tick so prediction can later
@@ -152,7 +167,14 @@ fn send_server_packets(
             client
         );
         if let Ok(mut transport) = transports.get_mut(client) {
-            transport.send_mut_erased(channel_kind, message, 1.0).ok();
+            if let Err(error_kind) = transport.send_mut_erased(channel_kind, message, 1.0) {
+                error!(
+                    ?error_kind,
+                    channel_idx,
+                    client = ?client,
+                    "failed to queue replicon server payload into transport sender"
+                );
+            }
         } else {
             trace!("send_server_packets: no transport for client {:?}", client);
         }
@@ -226,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn send_bridge_wraps_channel_zero_payload_beyond_packet_budget() {
+    fn send_bridge_drops_channel_zero_payload_that_would_overflow_after_wrapping() {
         let mut app = App::new();
         app.add_plugins(TransportPlugin)
             .add_plugins(RepliconChannelRegistrationPlugin)
@@ -252,9 +274,35 @@ mod tests {
         let mut transport = app.world_mut().get_mut::<Transport>(client).unwrap();
         let sender = transport.senders.get_mut(&channel_kind).unwrap();
         let (single, fragmented) = sender.sender.send_packet();
-        assert!(
-            !single.is_empty() || !fragmented.is_empty(),
-            "expected wrapped channel-0 payload to be queued for transport send"
-        );
+        assert!(single.is_empty());
+        assert!(fragmented.is_empty());
+    }
+
+    #[test]
+    fn send_bridge_keeps_channel_zero_payload_when_wrapper_fits_budget() {
+        let mut app = App::new();
+        app.add_plugins(TransportPlugin)
+            .add_plugins(RepliconChannelRegistrationPlugin)
+            .insert_resource(LocalTimeline::default())
+            .insert_resource(ServerMessages::new(ServerEntityMap::default()));
+
+        let registry = app.world().resource::<lightyear_transport::prelude::ChannelRegistry>();
+        let mut transport = Transport::default();
+        transport.add_sender_from_registry::<RepliconUpdatesChannel>(registry);
+        transport.add_sender_from_registry::<RepliconMutationsChannel>(registry);
+
+        let client = app.world_mut().spawn((ClientOf, transport)).id();
+        let payload = Bytes::from(vec![0_u8; 1193]);
+        app.world_mut()
+            .resource_mut::<ServerMessages>()
+            .insert_sent(client, 0, payload);
+
+        app.world_mut().run_system_once(send_server_packets).unwrap();
+
+        let channel_kind = app.world().resource::<RepliconChannelMap>().server_channels[0].0;
+        let mut transport = app.world_mut().get_mut::<Transport>(client).unwrap();
+        let sender = transport.senders.get_mut(&channel_kind).unwrap();
+        let (single, fragmented) = sender.sender.send_packet();
+        assert!(!single.is_empty() || !fragmented.is_empty());
     }
 }
