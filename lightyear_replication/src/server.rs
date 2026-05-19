@@ -19,7 +19,7 @@ use lightyear_transport::prelude::Transport;
 use crate::channels::RepliconChannelMap;
 use crate::checkpoint::{WRAPPED_SERVER_PAYLOAD_HEADER_LEN, wrap_server_payload};
 use lightyear_messages::plugin::MessageSystems;
-use tracing::{error, trace};
+use tracing::{error, info, trace};
 
 /// Adds the replicon server-side backend bridge for lightyear.
 ///
@@ -142,14 +142,35 @@ fn send_server_packets(
             && message.len() + WRAPPED_SERVER_PAYLOAD_HEADER_LEN
                 > lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE
         {
+            let max_packet_size = lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE;
+            let wrapped_len = message.len() + WRAPPED_SERVER_PAYLOAD_HEADER_LEN;
+            let overflow_bytes = wrapped_len - max_packet_size;
+            let overflow_ratio = wrapped_len as f32 / max_packet_size as f32;
+            let channel_label = match channel_idx {
+                0 => "replicon_updates",
+                1 => "replicon_mutations",
+                _ => "other",
+            };
             error!(
                 channel_idx,
                 client = ?client,
                 inner_len = message.len(),
                 wrapper_len = WRAPPED_SERVER_PAYLOAD_HEADER_LEN,
-                wrapped_len = message.len() + WRAPPED_SERVER_PAYLOAD_HEADER_LEN,
-                max_packet_size = lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE,
+                wrapped_len,
+                max_packet_size,
                 "dropping wrapped replicon payload that exceeds packet budget"
+            );
+            info!(
+                channel_idx,
+                channel_label,
+                client = ?client,
+                timeline_tick = ?timeline.tick(),
+                inner_len = message.len(),
+                wrapped_len,
+                max_packet_size,
+                overflow_bytes,
+                overflow_ratio,
+                "replicon wrapped payload overflow diagnostic; likely large replication burst (e.g. join/hierarchy)"
             );
             continue;
         }
