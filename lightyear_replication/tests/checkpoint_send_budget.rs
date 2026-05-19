@@ -1,7 +1,7 @@
 use bytes::Bytes;
-use lightyear_netcode::MAX_PACKET_SIZE;
+use lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE;
 use lightyear_replication::checkpoint::wrap_server_payload;
-use lightyear_tick::Tick;
+use lightyear_core::tick::Tick;
 
 /// Regression coverage for send-side packet budgeting on replicon server channels 0/1.
 ///
