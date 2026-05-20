@@ -17,7 +17,7 @@ use lightyear_transport::plugin::TransportSystems;
 use lightyear_transport::prelude::Transport;
 
 use crate::channels::RepliconChannelMap;
-use crate::checkpoint::{WRAPPED_SERVER_PAYLOAD_HEADER_LEN, wrap_server_payload};
+use crate::checkpoint::wrap_server_payload;
 use lightyear_messages::plugin::MessageSystems;
 use tracing::{error, info, trace};
 
@@ -138,42 +138,6 @@ fn send_server_packets(
 ) {
     for (client, channel_idx, message) in server_messages.drain_sent() {
         let (channel_kind, _) = channel_map.server_channels[channel_idx];
-        if matches!(channel_idx, 0 | 1)
-            && message.len() + WRAPPED_SERVER_PAYLOAD_HEADER_LEN
-                > lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE
-        {
-            let max_packet_size = lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE;
-            let wrapped_len = message.len() + WRAPPED_SERVER_PAYLOAD_HEADER_LEN;
-            let overflow_bytes = wrapped_len - max_packet_size;
-            let overflow_ratio = wrapped_len as f32 / max_packet_size as f32;
-            let channel_label = match channel_idx {
-                0 => "replicon_updates",
-                1 => "replicon_mutations",
-                _ => "other",
-            };
-            error!(
-                channel_idx,
-                client = ?client,
-                inner_len = message.len(),
-                wrapper_len = WRAPPED_SERVER_PAYLOAD_HEADER_LEN,
-                wrapped_len,
-                max_packet_size,
-                "dropping wrapped replicon payload that exceeds packet budget"
-            );
-            info!(
-                channel_idx,
-                channel_label,
-                client = ?client,
-                timeline_tick = ?timeline.tick(),
-                inner_len = message.len(),
-                wrapped_len,
-                max_packet_size,
-                overflow_bytes,
-                overflow_ratio,
-                "replicon wrapped payload overflow diagnostic; likely large replication burst (e.g. join/hierarchy)"
-            );
-            continue;
-        }
         let message = match channel_idx {
             // Replicon channels 0/1 feed ConfirmHistory / ServerMutateTicks on the client.
             // Prefix them with the authoritative server Lightyear tick so prediction can later
@@ -181,6 +145,18 @@ fn send_server_packets(
             0 | 1 => wrap_server_payload(timeline.tick(), message),
             _ => message,
         };
+        if matches!(channel_idx, 0 | 1)
+            && message.len() > lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE
+        {
+            info!(
+                channel_idx,
+                client = ?client,
+                timeline_tick = ?timeline.tick(),
+                wrapped_len = message.len(),
+                max_packet_size = lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE,
+                "wrapped replicon payload exceeds packet budget; relying on transport fragmentation"
+            );
+        }
         trace!(
             "send_server_packets: sending {} bytes on channel_idx={} to {:?}",
             message.len(),
@@ -269,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn send_bridge_drops_channel_zero_payload_that_would_overflow_after_wrapping() {
+    fn send_bridge_fragments_channel_zero_payload_that_would_overflow_after_wrapping() {
         let mut app = App::new();
         app.add_plugins(TransportPlugin)
             .add_plugins(RepliconChannelRegistrationPlugin)
@@ -283,8 +259,9 @@ mod tests {
 
         let client = app.world_mut().spawn((ClientOf, transport)).id();
 
-        // Channel 0 is wrapped in send_server_packets; the 7-byte wrapper pushes this to 1201.
-        let payload = Bytes::from(vec![0_u8; 1194]);
+        // Channel 0 is wrapped in send_server_packets; this wrapped payload exceeds 1200 bytes
+        // and must be sent through the transport fragmentation path.
+        let payload = Bytes::from(vec![0_u8; 1778]);
         app.world_mut()
             .resource_mut::<ServerMessages>()
             .insert_sent(client, 0, payload);
@@ -296,7 +273,7 @@ mod tests {
         let sender = transport.senders.get_mut(&channel_kind).unwrap();
         let (single, fragmented) = sender.sender.send_packet();
         assert!(single.is_empty());
-        assert!(fragmented.is_empty());
+        assert!(!fragmented.is_empty());
     }
 
     #[test]
