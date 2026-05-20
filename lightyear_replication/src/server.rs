@@ -19,7 +19,7 @@ use lightyear_transport::prelude::Transport;
 use crate::channels::RepliconChannelMap;
 use crate::checkpoint::wrap_server_payload;
 use lightyear_messages::plugin::MessageSystems;
-use tracing::trace;
+use tracing::{error, info, trace};
 
 /// Adds the replicon server-side backend bridge for lightyear.
 ///
@@ -145,6 +145,18 @@ fn send_server_packets(
             0 | 1 => wrap_server_payload(timeline.tick(), message),
             _ => message,
         };
+        if matches!(channel_idx, 0 | 1)
+            && message.len() > lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE
+        {
+            info!(
+                channel_idx,
+                client = ?client,
+                timeline_tick = ?timeline.tick(),
+                wrapped_len = message.len(),
+                max_packet_size = lightyear_transport::packet::packet_builder::MAX_PACKET_SIZE,
+                "wrapped replicon payload exceeds packet budget; relying on transport fragmentation"
+            );
+        }
         trace!(
             "send_server_packets: sending {} bytes on channel_idx={} to {:?}",
             message.len(),
@@ -152,7 +164,14 @@ fn send_server_packets(
             client
         );
         if let Ok(mut transport) = transports.get_mut(client) {
-            transport.send_mut_erased(channel_kind, message, 1.0).ok();
+            if let Err(error_kind) = transport.send_mut_erased(channel_kind, message, 1.0) {
+                error!(
+                    ?error_kind,
+                    channel_idx,
+                    client = ?client,
+                    "failed to queue replicon server payload into transport sender"
+                );
+            }
         } else {
             trace!("send_server_packets: no transport for client {:?}", client);
         }
@@ -161,15 +180,29 @@ fn send_server_packets(
 
 #[cfg(test)]
 mod tests {
-    use super::sync_server_state;
+    use super::{send_server_packets, sync_server_state};
     use bevy_app::{App, Update};
+    use bevy_ecs::system::RunSystemOnce;
+    use bevy_replicon::core::server_entity_map::ServerEntityMap;
     use bevy_replicon::prelude::ServerState;
+    use bevy_replicon::server::ServerMessages;
     use bevy_state::app::StatesPlugin;
     use bevy_state::state::State;
+    use bytes::Bytes;
     use lightyear_connection::client::PeerMetadata;
+    use lightyear_connection::client_of::ClientOf;
     use lightyear_connection::server::Stopped;
+    use lightyear_core::prelude::LocalTimeline;
     use lightyear_link::prelude::Server;
+    use lightyear_transport::channel::senders::ChannelSend;
+    use lightyear_transport::plugin::TransportPlugin;
+    use lightyear_transport::prelude::Transport;
     use test_log::test;
+
+    use crate::channels::{
+        RepliconChannelMap, RepliconChannelRegistrationPlugin, RepliconMutationsChannel,
+        RepliconUpdatesChannel,
+    };
 
     #[test]
     fn non_server_stopped_marker_does_not_stop_local_sender() {
@@ -209,5 +242,65 @@ mod tests {
             *app.world().resource::<State<ServerState>>().get(),
             ServerState::Stopped
         );
+    }
+
+    #[test]
+    fn send_bridge_fragments_channel_zero_payload_that_would_overflow_after_wrapping() {
+        let mut app = App::new();
+        app.add_plugins(TransportPlugin)
+            .add_plugins(RepliconChannelRegistrationPlugin)
+            .insert_resource(LocalTimeline::default())
+            .insert_resource(ServerMessages::new(ServerEntityMap::default()));
+
+        let registry = app.world().resource::<lightyear_transport::prelude::ChannelRegistry>();
+        let mut transport = Transport::default();
+        transport.add_sender_from_registry::<RepliconUpdatesChannel>(registry);
+        transport.add_sender_from_registry::<RepliconMutationsChannel>(registry);
+
+        let client = app.world_mut().spawn((ClientOf, transport)).id();
+
+        // Channel 0 is wrapped in send_server_packets; this wrapped payload exceeds 1200 bytes
+        // and must be sent through the transport fragmentation path.
+        let payload = Bytes::from(vec![0_u8; 1778]);
+        app.world_mut()
+            .resource_mut::<ServerMessages>()
+            .insert_sent(client, 0, payload);
+
+        app.world_mut().run_system_once(send_server_packets).unwrap();
+
+        let channel_kind = app.world().resource::<RepliconChannelMap>().server_channels[0].0;
+        let mut transport = app.world_mut().get_mut::<Transport>(client).unwrap();
+        let sender = transport.senders.get_mut(&channel_kind).unwrap();
+        let (single, fragmented) = sender.sender.send_packet();
+        assert!(single.is_empty());
+        assert!(!fragmented.is_empty());
+    }
+
+    #[test]
+    fn send_bridge_keeps_channel_zero_payload_when_wrapper_fits_budget() {
+        let mut app = App::new();
+        app.add_plugins(TransportPlugin)
+            .add_plugins(RepliconChannelRegistrationPlugin)
+            .insert_resource(LocalTimeline::default())
+            .insert_resource(ServerMessages::new(ServerEntityMap::default()));
+
+        let registry = app.world().resource::<lightyear_transport::prelude::ChannelRegistry>();
+        let mut transport = Transport::default();
+        transport.add_sender_from_registry::<RepliconUpdatesChannel>(registry);
+        transport.add_sender_from_registry::<RepliconMutationsChannel>(registry);
+
+        let client = app.world_mut().spawn((ClientOf, transport)).id();
+        let payload = Bytes::from(vec![0_u8; 1193]);
+        app.world_mut()
+            .resource_mut::<ServerMessages>()
+            .insert_sent(client, 0, payload);
+
+        app.world_mut().run_system_once(send_server_packets).unwrap();
+
+        let channel_kind = app.world().resource::<RepliconChannelMap>().server_channels[0].0;
+        let mut transport = app.world_mut().get_mut::<Transport>(client).unwrap();
+        let sender = transport.senders.get_mut(&channel_kind).unwrap();
+        let (single, fragmented) = sender.sender.send_packet();
+        assert!(!single.is_empty() || !fragmented.is_empty());
     }
 }

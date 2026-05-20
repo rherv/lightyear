@@ -51,6 +51,7 @@ use lightyear_core::tick::Tick;
 const CHECKPOINT_MAGIC: [u8; 2] = *b"LY";
 const CHECKPOINT_VERSION: u8 = 1;
 const HEADER_LEN: usize = 7;
+pub const WRAPPED_SERVER_PAYLOAD_HEADER_LEN: usize = HEADER_LEN;
 const MAX_STORED_CHECKPOINTS: usize = 256;
 
 /// Lightyear-owned header prepended to wrapped Replicon server payloads.
