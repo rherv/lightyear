@@ -14,12 +14,14 @@ use lightyear::input::bei::prelude::{Action, ActionOf, Fire};
 use lightyear::prelude::client::{InputDelayConfig, InputTimelineConfig};
 use lightyear::prelude::input::bei::InputMarker;
 use lightyear::prelude::*;
+use lightyear_frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
 
 pub struct ExampleClientPlugin;
 
 impl Plugin for ExampleClientPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(AutomationClientPlugin);
+        app.add_plugins(FrameInterpolationPlugin::<PlayerPosition>::default());
         app.add_systems(Startup, configure_input_delay);
         app.add_systems(FixedUpdate, integrate_player_movement);
         app.add_systems(Update, receive_message1);
@@ -86,6 +88,7 @@ pub(crate) fn receive_message1(mut receiver: Single<&mut MessageReceiver<Message
 pub(crate) fn handle_predicted_spawn(
     trigger: On<Add, (PlayerId, Predicted)>,
     mut predicted: Query<&mut PlayerColor, With<Predicted>>,
+    mut commands: Commands,
 ) {
     let entity = trigger.entity;
     if let Ok(mut color) = predicted.get_mut(entity) {
@@ -94,6 +97,9 @@ pub(crate) fn handle_predicted_spawn(
             ..Hsva::from(color.0)
         };
         color.0 = Color::from(hsva);
+        commands
+            .entity(entity)
+            .insert(FrameInterpolate::<PlayerPosition>::default());
     }
 }
 
