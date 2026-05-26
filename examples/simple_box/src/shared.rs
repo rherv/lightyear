@@ -89,3 +89,16 @@ pub(crate) fn apply_player_input(mut velocity: Mut<PlayerVelocity>, input: Vec2)
     velocity.x += input.x * MOVE_SPEED;
     velocity.y += input.y * MOVE_SPEED;
 }
+
+pub(crate) fn integrate_player_velocity(
+    mut position: Mut<PlayerPosition>,
+    mut velocity: Mut<PlayerVelocity>,
+) {
+    const VELOCITY_DECAY: f32 = 0.85;
+    const VELOCITY_EPSILON: f32 = 0.01;
+    position.0 += velocity.0;
+    velocity.0 *= VELOCITY_DECAY;
+    if velocity.length_squared() < VELOCITY_EPSILON * VELOCITY_EPSILON {
+        velocity.0 = Vec2::ZERO;
+    }
+}

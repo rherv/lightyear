@@ -24,10 +24,24 @@ impl Plugin for ExampleServerPlugin {
         app.add_plugins(AutomationServerPlugin);
         app.insert_resource(ReplicationMetadata::new(SEND_INTERVAL));
         // the physics/FixedUpdates systems that consume inputs should be run in this set.
+        app.add_systems(FixedUpdate, integrate_player_movement);
         app.add_observer(move_player);
         app.add_observer(handle_new_client);
         app.add_observer(handle_connected);
         app.add_systems(Update, send_message);
+    }
+}
+
+fn integrate_player_movement(
+    host_server: Query<(), With<HostServer>>,
+    mut players: Query<(&mut PlayerPosition, &mut PlayerVelocity, Has<Predicted>)>,
+) {
+    let is_host_server = !host_server.is_empty();
+    for (position, velocity, predicted) in &mut players {
+        if is_host_server && predicted {
+            continue;
+        }
+        shared::integrate_player_velocity(position, velocity);
     }
 }
 

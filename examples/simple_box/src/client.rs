@@ -21,11 +21,24 @@ impl Plugin for ExampleClientPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(AutomationClientPlugin);
         app.add_systems(Startup, configure_input_delay);
+        app.add_systems(FixedUpdate, integrate_player_movement);
         app.add_systems(Update, receive_message1);
         app.add_observer(handle_predicted_spawn);
         app.add_observer(handle_controlled_spawn);
         app.add_observer(handle_interpolated_spawn);
         app.add_observer(player_movement);
+    }
+}
+
+fn integrate_player_movement(
+    synced_client: Query<(), (With<Client>, With<IsSynced<InputTimeline>>)>,
+    mut players: Query<(&mut PlayerPosition, &mut PlayerVelocity), With<Predicted>>,
+) {
+    if synced_client.is_empty() {
+        return;
+    }
+    for (position, velocity) in &mut players {
+        shared::integrate_player_velocity(position, velocity);
     }
 }
 
