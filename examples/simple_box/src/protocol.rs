@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct PlayerBundle {
     id: PlayerId,
     position: PlayerPosition,
+    velocity: PlayerVelocity,
     color: PlayerColor,
 }
 
@@ -30,6 +31,7 @@ impl PlayerBundle {
         Self {
             id: PlayerId(id),
             position: PlayerPosition(position),
+            velocity: PlayerVelocity(Vec2::ZERO),
             color: PlayerColor(color),
         }
     }
@@ -42,6 +44,9 @@ pub struct PlayerId(PeerId);
 
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Deref, DerefMut)]
 pub struct PlayerPosition(pub Vec2);
+
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Deref, DerefMut)]
+pub struct PlayerVelocity(pub Vec2);
 
 impl Ease for PlayerPosition {
     fn interpolating_curve_unbounded(start: Self, end: Self) -> impl Curve<Self> {
@@ -133,6 +138,7 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<PlayerPosition>()
             .add_prediction()
             .add_linear_interpolation();
+        app.register_component::<PlayerVelocity>().add_prediction();
 
         app.register_component::<PlayerColor>();
 

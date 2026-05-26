@@ -43,7 +43,7 @@ fn player_movement(
     synced_client: Query<(), (With<Client>, With<IsSynced<InputTimeline>>)>,
     host_server: Query<(), With<HostServer>>,
     server_actions: Query<(), (With<Action<MovePlayer>>, With<Replicate>)>,
-    mut position_query: Query<&mut PlayerPosition, With<Predicted>>,
+    mut velocity_query: Query<&mut PlayerVelocity, With<Predicted>>,
 ) {
     if synced_client.is_empty() {
         return;
@@ -51,13 +51,8 @@ fn player_movement(
     if !host_server.is_empty() && server_actions.contains(trigger.action) {
         return;
     }
-    if let Ok(position) = position_query.get_mut(trigger.context) {
-        shared::shared_movement_behaviour(position, &Inputs::Direction(Direction {
-            up: trigger.value.y > 0.0,
-            down: trigger.value.y < 0.0,
-            left: trigger.value.x < 0.0,
-            right: trigger.value.x > 0.0,
-        }));
+    if let Ok(velocity) = velocity_query.get_mut(trigger.context) {
+        shared::apply_player_input(velocity, trigger.value);
     }
 }
 

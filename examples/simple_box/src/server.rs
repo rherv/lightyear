@@ -84,7 +84,7 @@ fn move_player(
     server_actions: Query<(), (With<Action<MovePlayer>>, With<shared::ServerAction>)>,
     controlled_by: Query<&ControlledBy>,
     host_clients: Query<(), With<HostClient>>,
-    mut position_query: Query<&mut PlayerPosition>,
+    mut velocity_query: Query<&mut PlayerVelocity>,
 ) {
     let is_host_server = !host_server.is_empty();
     if is_host_server && !server_actions.contains(trigger.action) {
@@ -97,13 +97,8 @@ fn move_player(
             }
         }
     }
-    if let Ok(position) = position_query.get_mut(trigger.context) {
-        shared::shared_movement_behaviour(position, &Inputs::Direction(Direction {
-            up: trigger.value.y > 0.0,
-            down: trigger.value.y < 0.0,
-            left: trigger.value.x < 0.0,
-            right: trigger.value.x > 0.0,
-        }));
+    if let Ok(velocity) = velocity_query.get_mut(trigger.context) {
+        shared::apply_player_input(velocity, trigger.value);
     }
 }
 

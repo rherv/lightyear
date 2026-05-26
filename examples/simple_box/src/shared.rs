@@ -83,3 +83,9 @@ pub(crate) fn shared_movement_behaviour(mut position: Mut<PlayerPosition>, input
         position.x += MOVE_SPEED;
     }
 }
+
+pub(crate) fn apply_player_input(mut velocity: Mut<PlayerVelocity>, input: Vec2) {
+    const MOVE_SPEED: f32 = 10.0;
+    velocity.x += input.x * MOVE_SPEED;
+    velocity.y += input.y * MOVE_SPEED;
+}
