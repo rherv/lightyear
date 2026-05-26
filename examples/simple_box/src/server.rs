@@ -10,9 +10,9 @@ use crate::automation::AutomationServerPlugin;
 use crate::protocol::*;
 use crate::shared;
 use bevy::prelude::*;
+use bevy_enhanced_input::prelude::{Action, Fire};
 use lightyear::connection::client::Connected;
-use lightyear::connection::host::HostServer;
-use lightyear::prelude::input::native::*;
+use lightyear::connection::host::{HostClient, HostServer};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 use lightyear_examples_common::shared::SEND_INTERVAL;
@@ -24,7 +24,7 @@ impl Plugin for ExampleServerPlugin {
         app.add_plugins(AutomationServerPlugin);
         app.insert_resource(ReplicationMetadata::new(SEND_INTERVAL));
         // the physics/FixedUpdates systems that consume inputs should be run in this set.
-        app.add_systems(FixedUpdate, movement);
+        app.add_observer(move_player);
         app.add_observer(handle_new_client);
         app.add_observer(handle_connected);
         app.add_systems(Update, send_message);
@@ -56,8 +56,9 @@ pub(crate) fn handle_connected(
         return;
     };
     let client_id = client_id.0;
-    let entity = commands
+    let player_entity = commands
         .spawn((
+            Player,
             PlayerBundle::new(client_id, Vec2::ZERO),
             // we replicate the Player entity to all clients that are connected to this server
             Replicate::to_clients(NetworkTarget::All),
@@ -71,35 +72,38 @@ pub(crate) fn handle_connected(
         .id();
     info!(
         "Create player entity {:?} for client {:?}",
-        entity, client_id
+        player_entity, client_id
     );
+    shared::spawn_action_entities(&mut commands, player_entity, client_id, true);
 }
 
 /// Read client inputs and move players in server therefore giving a basis for other clients
-fn movement(
-    timeline: Res<LocalTimeline>,
+fn move_player(
+    trigger: On<Fire<MovePlayer>>,
     host_server: Query<(), With<HostServer>>,
-    mut position_query: Query<(&mut PlayerPosition, &ActionState<Inputs>, Has<Predicted>)>,
+    server_actions: Query<(), (With<Action<MovePlayer>>, With<shared::ServerAction>)>,
+    controlled_by: Query<&ControlledBy>,
+    host_clients: Query<(), With<HostClient>>,
+    mut position_query: Query<&mut PlayerPosition>,
 ) {
     let is_host_server = !host_server.is_empty();
-    let tick = timeline.tick();
-    for (position, inputs, predicted) in position_query.iter_mut() {
-        if is_host_server && predicted {
-            continue;
+    if is_host_server && !server_actions.contains(trigger.action) {
+        return;
+    }
+    if is_host_server {
+        if let Ok(controlled_by) = controlled_by.get(trigger.context) {
+            if host_clients.get(controlled_by.owner).is_ok() {
+                return;
+            }
         }
-        trace!(?tick, ?position, ?inputs, "server");
-        trace!(
-            target: "lightyear_debug::simple_box",
-            kind = "simple_box_server_input",
-            schedule = "FixedUpdate",
-            sample_point = "FixedUpdate",
-            local_tick = tick.0,
-            input = ?inputs.0,
-            position = ?position.0,
-            predicted,
-            "applied simple_box server input"
-        );
-        shared::shared_movement_behaviour(position, inputs);
+    }
+    if let Ok(position) = position_query.get_mut(trigger.context) {
+        shared::shared_movement_behaviour(position, &Inputs::Direction(Direction {
+            up: trigger.value.y > 0.0,
+            down: trigger.value.y < 0.0,
+            left: trigger.value.x < 0.0,
+            right: trigger.value.x > 0.0,
+        }));
     }
 }
 
