@@ -8,6 +8,7 @@
 use bevy::ecs::entity::MapEntities;
 use bevy::math::Curve;
 use bevy::prelude::*;
+use lightyear::prelude::input::bei::*;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +54,10 @@ impl Ease for PlayerPosition {
 #[derive(Component, Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct PlayerColor(pub(crate) Color);
 
+// Input context
+#[derive(Component, Serialize, Deserialize, Reflect, Clone, Debug, PartialEq)]
+pub struct Player;
+
 // Example of a component that contains an entity.
 // This component, when replicated, needs to have the inner entity mapped from the Server world
 // to the client World.
@@ -76,6 +81,9 @@ pub struct Channel1;
 pub struct Message1(pub usize);
 
 // Inputs
+#[derive(Debug, InputAction)]
+#[action_output(Vec2)]
+pub struct MovePlayer;
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq, Clone, Reflect)]
 pub struct Direction {
@@ -117,7 +125,8 @@ impl Plugin for ProtocolPlugin {
             .add_direction(NetworkDirection::ServerToClient);
 
         // inputs
-        app.add_plugins(input::native::InputPlugin::<Inputs>::default());
+        app.add_plugins(InputPlugin::<Player>::default());
+        app.register_input_action::<MovePlayer>();
         // components
         app.register_component::<PlayerId>();
 
