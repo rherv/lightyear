@@ -15,6 +15,7 @@ use lightyear::prelude::input::native::ActionState;
 use lightyear_connection::prelude::NetworkTarget;
 use lightyear_core::id::PeerId;
 use lightyear_core::prelude::LocalTimeline;
+use lightyear_core::tick::Tick;
 use lightyear_messages::MessageManager;
 use lightyear_prediction::despawn::{PredictionDespawnCommandsExt, PredictionDisable};
 use lightyear_prediction::manager::{LastConfirmedInput, RollbackMode};
@@ -1042,4 +1043,940 @@ fn test_deterministic_predicted_despawn() {
             .get_entity(predicted_a)
             .is_err()
     )
+}
+
+// =============================================================================
+// State rollback request churn diagnostics
+// =============================================================================
+//
+// These tests document a rollback churn pattern observed after the Replicon
+// rollback changes.
+//
+// There are two independent state rollback request paths:
+//
+// 1. confirmed-update path:
+//    A replicated component update is written into PredictionHistory and, when
+//    it mismatches prediction history, records
+//    StateRollbackMetadata::earliest_mismatch_tick.
+//
+// 2. unchanged-entity path:
+//    ServerMutateTicks advances, but an entity's ConfirmHistory is older. The
+//    rollback checker infers that the entity was unchanged at the newer
+//    server-confirmed tick and compares its last confirmed value against
+//    prediction history.
+//
+// The problematic request-chain is:
+//
+//     unchanged_entity rollback
+//     -> rollback/replay
+//     -> confirmed_update mismatch for the same or adjacent server window
+//     -> second rollback/replay
+//
+// The model tests below document the request lifecycle. The ignored same-window
+// diagnostic documents the suspected bad invariant violation. The real
+// replication stepper proves that the two request paths can chain through actual
+// server->client Replicon delivery.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeledRollbackRequestCause {
+    ConfirmedUpdate,
+    UnchangedEntity,
+}
+
+#[derive(Debug, Default)]
+struct ModeledStateRollbackMetadata {
+    last_processed_tick: Option<Tick>,
+    earliest_mismatch_tick: Option<Tick>,
+}
+
+impl ModeledStateRollbackMetadata {
+    fn record_mismatch(&mut self, tick: Tick) {
+        match self.earliest_mismatch_tick {
+            None => self.earliest_mismatch_tick = Some(tick),
+            Some(existing) if tick < existing => self.earliest_mismatch_tick = Some(tick),
+            _ => {}
+        }
+    }
+
+    fn take_ready_mismatch_tick(&mut self, local_tick: Tick) -> Option<Tick> {
+        let mismatch_tick = self.earliest_mismatch_tick?;
+        if mismatch_tick >= local_tick {
+            return None;
+        }
+        self.earliest_mismatch_tick = None;
+        Some(mismatch_tick)
+    }
+
+    fn has_server_mutate_ticks_advanced(&self, server_confirmed_tick: Tick) -> bool {
+        match self.last_processed_tick {
+            None => true,
+            Some(last_processed_tick) => server_confirmed_tick > last_processed_tick,
+        }
+    }
+
+    fn set_last_processed_tick(&mut self, server_confirmed_tick: Tick) {
+        self.last_processed_tick = Some(server_confirmed_tick);
+    }
+}
+
+/// Minimal model of the two state rollback request sites in `check_rollback`.
+/// This helper models request emission only, not ECS execution.
+fn simulate_state_check_pass(
+    metadata: &mut ModeledStateRollbackMetadata,
+    local_tick: Tick,
+    server_confirmed_tick: Tick,
+    unchanged_entity_mismatch_count: usize,
+) -> Vec<(ModeledRollbackRequestCause, Tick)> {
+    let mut requests = Vec::new();
+
+    // confirmed-update path
+    if let Some(mismatch_tick) = metadata.take_ready_mismatch_tick(local_tick) {
+        requests.push((ModeledRollbackRequestCause::ConfirmedUpdate, mismatch_tick));
+    }
+
+    // unchanged-entity path
+    if metadata.has_server_mutate_ticks_advanced(server_confirmed_tick) {
+        for _ in 0..unchanged_entity_mismatch_count {
+            requests.push((
+                ModeledRollbackRequestCause::UnchangedEntity,
+                server_confirmed_tick,
+            ));
+        }
+    }
+
+    metadata.set_last_processed_tick(server_confirmed_tick);
+    requests
+}
+
+/// Documents unchanged-entity fanout: more than one stale predicted entity can
+/// emit an unchanged-entity rollback request in a single state check pass.
+#[test]
+fn test_state_rollback_request_model_allows_unchanged_entity_fanout() {
+    let mut metadata = ModeledStateRollbackMetadata::default();
+
+    let requests = simulate_state_check_pass(&mut metadata, Tick(904), Tick(903), 2);
+
+    assert_eq!(
+        requests,
+        vec![
+            (ModeledRollbackRequestCause::UnchangedEntity, Tick(903)),
+            (ModeledRollbackRequestCause::UnchangedEntity, Tick(903)),
+        ]
+    );
+}
+
+/// Documents the minimal churn mechanism:
+///
+/// Pass 1 emits an unchanged-entity rollback request for a server-confirmed
+/// tick. After rollback/replay, state diffing can record a confirmed-update
+/// mismatch for that same tick. Pass 2 then emits a confirmed-update rollback
+/// request for the same rollback window.
+///
+/// This is not necessarily wrong by itself, but it is the request-lifecycle
+/// shape seen in the live churn logs.
+#[test]
+fn test_state_rollback_request_model_allows_unchanged_then_confirmed_follow_up_same_window() {
+    let mut metadata = ModeledStateRollbackMetadata::default();
+
+    let mismatch_tick = Tick(903);
+    let local_tick = Tick(904);
+
+    let pass1 = simulate_state_check_pass(&mut metadata, local_tick, mismatch_tick, 1);
+    assert_eq!(
+        pass1,
+        vec![(ModeledRollbackRequestCause::UnchangedEntity, mismatch_tick)]
+    );
+
+    // Between passes, mismatch is re-recorded by state diffing / write_history.
+    metadata.record_mismatch(mismatch_tick);
+
+    let pass2 = simulate_state_check_pass(&mut metadata, local_tick, mismatch_tick, 0);
+    assert_eq!(
+        pass2,
+        vec![(ModeledRollbackRequestCause::ConfirmedUpdate, mismatch_tick)]
+    );
+}
+
+/// Control: if unchanged-entity mismatch is absent, a confirmed-update mismatch
+/// produces a single confirmed-update rollback request.
+#[test]
+fn test_state_rollback_request_model_confirmed_update_only_is_single_request() {
+    let mut metadata = ModeledStateRollbackMetadata::default();
+
+    metadata.record_mismatch(Tick(50));
+
+    let requests = simulate_state_check_pass(&mut metadata, Tick(51), Tick(50), 0);
+
+    assert_eq!(
+        requests,
+        vec![(ModeledRollbackRequestCause::ConfirmedUpdate, Tick(50))]
+    );
+}
+
+/// Diagnostic reproduction of the exact same-local-tick / same-window churn
+/// shape seen in live logs.
+///
+/// Phase 1 uses the real unchanged-entity path:
+/// - ServerMutateTicks advances.
+/// - The entity ConfirmHistory is stale.
+/// - The unchanged-entity path requests rollback.
+///
+/// Phase 2 manually injects the confirmed-update mismatch with
+/// trigger_rollback_check(), standing in for PredictionRegistry::write_history.
+/// This is intentional: it isolates the rollback scheduler/lifecycle behavior
+/// from packet delivery timing.
+///
+/// The real-replication companion test below proves that write_history can
+/// produce the phase-2 confirmed-update rollback through actual server->client
+/// replication. This diagnostic proves that if that mismatch is recorded before
+/// the local tick advances, the same rollback window can be executed twice.
+///
+/// This test is ignored because the final assertion describes the desired fixed
+/// invariant, not the current behavior.
+#[test]
+#[ignore = "documents suspected rollback churn bug: same local tick/window can rollback twice"]
+fn test_state_rollback_should_coalesce_same_window_follow_up_request() {
+    use lightyear_prediction::diagnostics::PredictionMetrics;
+
+    #[derive(Resource, Default, Debug)]
+    struct RollbackProbe {
+        hits: Vec<(Tick, Tick)>, // (local_tick, rollback_tick)
+    }
+
+    fn increment_component(mut query: Query<&mut CompFull, With<Predicted>>) {
+        for mut comp in query.iter_mut() {
+            comp.0 += 1.0;
+        }
+    }
+
+    fn record_rollback_after_check(
+        timeline: Res<LocalTimeline>,
+        manager: Single<&PredictionManager>,
+        mut probe: ResMut<RollbackProbe>,
+    ) {
+        let local_tick = timeline.tick();
+        let rollback_start = manager.get_rollback_start_tick();
+
+        info!(
+            ?local_tick,
+            ?rollback_start,
+            is_rollback = manager.is_rollback(),
+            "same-window-churn probe: after RollbackSystems::Check"
+        );
+
+        if let Some(rollback_tick) = rollback_start {
+            probe.hits.push((local_tick, rollback_tick));
+        }
+    }
+
+    fn log_metrics(label: &'static str, stepper: &mut ClientServerStepper) {
+        let local_tick = stepper.client_tick(0);
+        let metrics = stepper
+            .client_app()
+            .world()
+            .get_resource::<PredictionMetrics>()
+            .map(|m| (m.rollbacks, m.rollback_ticks))
+            .unwrap_or((0, 0));
+
+        let hits = stepper
+            .client_app()
+            .world()
+            .get_resource::<RollbackProbe>()
+            .map(|p| p.hits.clone())
+            .unwrap_or_default();
+
+        info!(
+            label,
+            ?local_tick,
+            rollbacks = metrics.0,
+            rollback_ticks = metrics.1,
+            ?hits,
+            "same-window-churn metrics"
+        );
+    }
+
+    let (mut stepper, predicted_a) = setup();
+
+    // Add a second predicted entity so unchanged-entity fanout has the same
+    // shape as the live logs, where two entities requested unchanged rollback
+    // for the same server-confirmed window.
+    let predicted_b = stepper
+        .client_app()
+        .world_mut()
+        .spawn((Predicted, CompFull(10.0)))
+        .id();
+
+    // Initialize prediction history for predicted_b.
+    stepper.frame_step(1);
+
+    stepper
+        .client_app()
+        .add_systems(FixedUpdate, increment_component);
+
+    stepper.client_app().insert_resource(RollbackProbe::default());
+    stepper.client_app().add_systems(
+        PreUpdate,
+        record_rollback_after_check
+            .after(RollbackSystems::Check)
+            .before(RollbackSystems::Prepare),
+    );
+
+    // Build enough predicted history that stale-confirmed values and newer
+    // predicted values are distinct.
+    stepper.frame_step(3);
+
+    let local_tick = stepper.client_tick(0);
+    let stale_tick = local_tick - 2;
+    let mismatch_tick = local_tick - 1;
+
+    let stale_replicon_tick = RepliconTick::new(700);
+    let server_replicon_tick = RepliconTick::new(701);
+
+    info!(
+        ?local_tick,
+        ?stale_tick,
+        ?mismatch_tick,
+        ?predicted_a,
+        ?predicted_b,
+        "same-window-churn: seed begin"
+    );
+
+    // Phase 1 seed:
+    //
+    // Do NOT call trigger_rollback_check() here. The first rollback must come
+    // only from the unchanged-entity path.
+    {
+        let world = stepper.client_app().world_mut();
+
+        world
+            .resource_mut::<lightyear_replication::checkpoint::ReplicationCheckpointMap>()
+            .record(stale_replicon_tick, stale_tick);
+        world
+            .resource_mut::<lightyear_replication::checkpoint::ReplicationCheckpointMap>()
+            .record(server_replicon_tick, mismatch_tick);
+
+        world
+            .resource_mut::<ServerMutateTicks>()
+            .confirm(server_replicon_tick, 1);
+
+        world
+            .entity_mut(predicted_a)
+            .insert(ConfirmHistory::new(stale_replicon_tick));
+        world
+            .entity_mut(predicted_a)
+            .get_mut::<PredictionHistory<CompFull>>()
+            .expect("predicted_a should have PredictionHistory<CompFull>")
+            .add_confirmed(stale_tick, Some(CompFull(-100.0)));
+
+        world
+            .entity_mut(predicted_b)
+            .insert(ConfirmHistory::new(stale_replicon_tick));
+        world
+            .entity_mut(predicted_b)
+            .get_mut::<PredictionHistory<CompFull>>()
+            .expect("predicted_b should have PredictionHistory<CompFull>")
+            .add_confirmed(stale_tick, Some(CompFull(-200.0)));
+    }
+
+    let (a_live, b_live) = {
+        let world = stepper.client_app().world();
+        (
+            world.get::<CompFull>(predicted_a).cloned(),
+            world.get::<CompFull>(predicted_b).cloned(),
+        )
+    };
+
+    info!(
+        ?stale_replicon_tick,
+        ?server_replicon_tick,
+        ?stale_tick,
+        ?mismatch_tick,
+        ?a_live,
+        ?b_live,
+        "same-window-churn: phase 1 seeded stale ConfirmHistory + advanced ServerMutateTicks"
+    );
+
+    log_metrics("before first manual client update", &mut stepper);
+
+    // Manually update only the client app. This runs another check cycle
+    // without using frame_step(), so the local tick is intentionally not
+    // advanced by the harness.
+    let tick_before_first_update = stepper.client_tick(0);
+    stepper.client_app().update();
+    let tick_after_first_update = stepper.client_tick(0);
+
+    log_metrics("after first manual client update", &mut stepper);
+
+    let hits_after_first = stepper
+        .client_app()
+        .world()
+        .resource::<RollbackProbe>()
+        .hits
+        .clone();
+
+    assert!(
+        !hits_after_first.is_empty(),
+        "expected first manual client update to request rollback from unchanged-entity path; \
+         tick_before_first_update={tick_before_first_update:?}, \
+         tick_after_first_update={tick_after_first_update:?}"
+    );
+
+    let (first_local_tick, first_rollback_tick) = hits_after_first[0];
+
+    assert_eq!(
+        first_rollback_tick, mismatch_tick,
+        "expected first rollback to target the ServerMutateTicks-confirmed mismatch window"
+    );
+
+    info!(
+        ?first_local_tick,
+        ?first_rollback_tick,
+        ?tick_before_first_update,
+        ?tick_after_first_update,
+        "same-window-churn: first rollback observed"
+    );
+
+    // Phase 2 seed:
+    //
+    // Mimic the follow-up confirmed update for the same server window being
+    // recorded after unchanged rollback completed, but before local tick
+    // advances. This is the part that the real-replication companion test proves
+    // can come from write_history; here we inject it to isolate same-tick
+    // scheduler behavior.
+    {
+        let world = stepper.client_app().world_mut();
+
+        world
+            .entity_mut(predicted_a)
+            .get_mut::<PredictionHistory<CompFull>>()
+            .expect("predicted_a should still have PredictionHistory<CompFull>")
+            .add_confirmed(mismatch_tick, Some(CompFull(1234.0)));
+
+        world
+            .entity_mut(predicted_b)
+            .get_mut::<PredictionHistory<CompFull>>()
+            .expect("predicted_b should still have PredictionHistory<CompFull>")
+            .add_confirmed(mismatch_tick, Some(CompFull(5678.0)));
+    }
+
+    trigger_rollback_check(&mut stepper, mismatch_tick);
+
+    let (a_live, b_live) = {
+        let world = stepper.client_app().world();
+        (
+            world.get::<CompFull>(predicted_a).cloned(),
+            world.get::<CompFull>(predicted_b).cloned(),
+        )
+    };
+
+    info!(
+        ?mismatch_tick,
+        ?a_live,
+        ?b_live,
+        "same-window-churn: phase 2 seeded confirmed-update follow-up mismatch"
+    );
+
+    log_metrics("before second manual client update", &mut stepper);
+
+    let tick_before_second_update = stepper.client_tick(0);
+    stepper.client_app().update();
+    let tick_after_second_update = stepper.client_tick(0);
+
+    log_metrics("after second manual client update", &mut stepper);
+
+    let final_hits = stepper
+        .client_app()
+        .world()
+        .resource::<RollbackProbe>()
+        .hits
+        .clone();
+
+    assert!(
+        final_hits.len() >= 2,
+        "expected current code to reproduce the same-window follow-up shape before checking the desired invariant; \
+         final_hits={final_hits:?}, \
+         tick_before_second_update={tick_before_second_update:?}, \
+         tick_after_second_update={tick_after_second_update:?}"
+    );
+
+    let (second_local_tick, second_rollback_tick) = final_hits[1];
+
+    assert_eq!(
+        second_rollback_tick, first_rollback_tick,
+        "diagnostic did not reproduce same-window churn; final_hits={final_hits:?}"
+    );
+
+    assert_eq!(
+        second_local_tick, first_local_tick,
+        "diagnostic did not reproduce same-local-tick churn; final_hits={final_hits:?}"
+    );
+
+    let same_window_hits = final_hits
+        .iter()
+        .filter(|(local_tick, rollback_tick)| {
+            *local_tick == first_local_tick && *rollback_tick == first_rollback_tick
+        })
+        .count();
+
+    assert_eq!(
+        same_window_hits, 1,
+        "rollback requests for the same local tick/window should be coalesced; \
+         observed final_hits={final_hits:?}"
+    );
+}
+
+/// Reproduces the rollback request-chain through real server->client
+/// replication.
+///
+/// Phase 1:
+/// - The server mutates a helper entity.
+/// - This advances ServerMutateTicks through real Replicon delivery.
+/// - The predicted entity does not receive an explicit component update, so it
+///   is checked by the unchanged-entity path.
+/// - The unchanged-entity path requests rollback.
+///
+/// Phase 2:
+/// - The server then mutates the predicted entity itself.
+/// - The client receives the update through the normal Replicon
+///   PredictionRegistry::write_history path.
+/// - The confirmed value mismatches PredictionHistory.
+/// - StateRollbackMetadata records the mismatch.
+/// - A later rollback check consumes it as a confirmed-update rollback.
+///
+/// This test proves the real pipeline can produce:
+///
+///     unchanged_entity rollback -> confirmed_update rollback
+///
+/// It does not require the second rollback to occur at the same local tick or
+/// for the same rollback tick. The ignored diagnostic above captures that
+/// stricter same-local-tick/same-window shape.
+#[test]
+fn test_state_rollback_real_replication_can_chain_unchanged_then_confirmed_update() {
+    use lightyear_prediction::diagnostics::PredictionMetrics;
+
+    #[derive(Resource, Default, Debug)]
+    struct RollbackProbe {
+        hits: Vec<(Tick, Tick)>, // (local_tick, rollback_tick)
+    }
+
+    fn increment_component(mut query: Query<&mut CompFull, With<Predicted>>) {
+        for mut comp in query.iter_mut() {
+            comp.0 += 1.0;
+        }
+    }
+
+    fn record_rollback_after_check(
+        timeline: Res<LocalTimeline>,
+        manager: Single<&PredictionManager>,
+        mut probe: ResMut<RollbackProbe>,
+    ) {
+        let local_tick = timeline.tick();
+        let rollback_start = manager.get_rollback_start_tick();
+
+        info!(
+            ?local_tick,
+            ?rollback_start,
+            is_rollback = manager.is_rollback(),
+            "rollback-chain-repro probe: after RollbackSystems::Check"
+        );
+
+        if let Some(rollback_tick) = rollback_start {
+            probe.hits.push((local_tick, rollback_tick));
+        }
+    }
+
+    fn log_client_state(
+        label: &'static str,
+        stepper: &mut ClientServerStepper,
+        predicted: Entity,
+    ) {
+        let local_tick = stepper.client_tick(0);
+        let server_tick = stepper.server_tick();
+
+        let metrics = stepper
+            .client_app()
+            .world()
+            .get_resource::<PredictionMetrics>()
+            .map(|m| (m.rollbacks, m.rollback_ticks))
+            .unwrap_or((0, 0));
+
+        let (
+            hits,
+            live,
+            history_len,
+            confirm_history_replicon_tick,
+            server_mutate_replicon_tick,
+        ) = {
+            let world = stepper.client_app().world();
+
+            let hits = world
+                .get_resource::<RollbackProbe>()
+                .map(|p| p.hits.clone())
+                .unwrap_or_default();
+
+            let live = world.get::<CompFull>(predicted).cloned();
+
+            let history_len = world
+                .get::<PredictionHistory<CompFull>>(predicted)
+                .map(|h| h.len());
+
+            let confirm_history_replicon_tick =
+                world.get::<ConfirmHistory>(predicted).map(|c| c.last_tick());
+
+            let server_mutate_replicon_tick =
+                world.resource::<ServerMutateTicks>().last_tick();
+
+            (
+                hits,
+                live,
+                history_len,
+                confirm_history_replicon_tick,
+                server_mutate_replicon_tick,
+            )
+        };
+
+        info!(
+            label,
+            ?local_tick,
+            ?server_tick,
+            rollbacks = metrics.0,
+            rollback_ticks = metrics.1,
+            ?hits,
+            ?live,
+            ?history_len,
+            ?confirm_history_replicon_tick,
+            ?server_mutate_replicon_tick,
+            "rollback-chain-repro client state"
+        );
+    }
+
+    let mut stepper = ClientServerStepper::from_config(StepperConfig::single());
+
+    // This is the predicted entity we care about. It is server-backed, so later
+    // server mutations can reach the client through Replicon and the normal
+    // PredictionRegistry::write_history path.
+    let server_predicted_entity = stepper
+        .server_app
+        .world_mut()
+        .spawn((
+            Replicate::to_clients(NetworkTarget::All),
+            PredictionTarget::to_clients(NetworkTarget::All),
+            CompFull(1.0),
+        ))
+        .id();
+
+    // Helper entity used only to advance ServerMutateTicks with a real server
+    // mutation while leaving server_predicted_entity unchanged.
+    let server_helper_entity = stepper
+        .server_app
+        .world_mut()
+        .spawn((
+            Replicate::to_clients(NetworkTarget::All),
+            CompFull(100.0),
+        ))
+        .id();
+
+    info!(
+        ?server_predicted_entity,
+        ?server_helper_entity,
+        "rollback-chain-repro: spawned server entities"
+    );
+
+    stepper.frame_step(4);
+
+    let predicted = stepper
+        .client(0)
+        .get::<MessageManager>()
+        .unwrap()
+        .entity_mapper
+        .get_local(server_predicted_entity)
+        .expect("server predicted entity should be mapped to a client entity");
+
+    let helper_client_entity = stepper
+        .client(0)
+        .get::<MessageManager>()
+        .unwrap()
+        .entity_mapper
+        .get_local(server_helper_entity)
+        .expect("server helper entity should be mapped to a client entity");
+
+    info!(
+        ?server_predicted_entity,
+        ?server_helper_entity,
+        ?predicted,
+        ?helper_client_entity,
+        "rollback-chain-repro: mapped server entities to client entities"
+    );
+
+    {
+        let world = stepper.client_app().world();
+        assert!(
+            world.get::<Predicted>(predicted).is_some(),
+            "client entity should be Predicted"
+        );
+        assert!(
+            world.get::<PredictionHistory<CompFull>>(predicted).is_some(),
+            "client entity should have PredictionHistory<CompFull>"
+        );
+        assert!(
+            world.get::<ConfirmHistory>(predicted).is_some(),
+            "client entity should have ConfirmHistory"
+        );
+    }
+
+    stepper
+        .client_app()
+        .add_systems(FixedUpdate, increment_component);
+
+    stepper.client_app().insert_resource(RollbackProbe::default());
+    stepper.client_app().add_systems(
+        PreUpdate,
+        record_rollback_after_check
+            .after(RollbackSystems::Check)
+            .before(RollbackSystems::Prepare),
+    );
+
+    // Build prediction history so the client has predicted values ahead of the
+    // server-confirmed region.
+    stepper.frame_step(3);
+
+    // Clear probe noise from setup/history-building frames.
+    stepper
+        .client_app()
+        .world_mut()
+        .resource_mut::<RollbackProbe>()
+        .hits
+        .clear();
+
+    // Use a real world tick near the server timeline, not a fake Replicon tick.
+    // The client is ahead of the server, so prediction history should contain
+    // this tick.
+    let stale_confirmed_tick = stepper.server_tick();
+
+    info!(
+        ?stale_confirmed_tick,
+        client_tick = ?stepper.client_tick(0),
+        server_tick = ?stepper.server_tick(),
+        "rollback-chain-repro: seeding stale confirmed value into prediction history"
+    );
+
+    {
+        let world = stepper.client_app().world_mut();
+
+        world
+            .entity_mut(predicted)
+            .get_mut::<PredictionHistory<CompFull>>()
+            .expect("predicted entity should have PredictionHistory<CompFull>")
+            .add_confirmed(stale_confirmed_tick, Some(CompFull(-100.0)));
+    }
+
+    log_client_state(
+        "after stale confirmed value seed, before helper mutation",
+        &mut stepper,
+        predicted,
+    );
+
+    // Phase 1: mutate only the helper entity on the server. This advances
+    // ServerMutateTicks through real replication while the predicted entity does
+    // not receive an explicit update, making it eligible for unchanged-entity
+    // rollback checking.
+    {
+        let mut helper = stepper
+            .server_app
+            .world_mut()
+            .entity_mut(server_helper_entity);
+        helper.get_mut::<CompFull>().unwrap().0 = 101.0;
+    }
+
+    info!(
+        server_tick = ?stepper.server_tick(),
+        client_tick = ?stepper.client_tick(0),
+        "rollback-chain-repro: phase 1 helper server mutation applied"
+    );
+
+    let phase_1_start_len = stepper
+        .client_app()
+        .world()
+        .resource::<RollbackProbe>()
+        .hits
+        .len();
+
+    for attempt in 1..=6 {
+        let before_client_tick = stepper.client_tick(0);
+        let before_server_tick = stepper.server_tick();
+
+        info!(
+            attempt,
+            ?before_client_tick,
+            ?before_server_tick,
+            "rollback-chain-repro: running server-first frame for phase 1 unchanged rollback"
+        );
+
+        stepper.frame_step_server_first(1);
+
+        log_client_state(
+            "after phase 1 server-first attempt",
+            &mut stepper,
+            predicted,
+        );
+
+        let hits = stepper
+            .client_app()
+            .world()
+            .resource::<RollbackProbe>()
+            .hits
+            .clone();
+
+        info!(
+            attempt,
+            before_client_tick = ?before_client_tick,
+            after_client_tick = ?stepper.client_tick(0),
+            before_server_tick = ?before_server_tick,
+            after_server_tick = ?stepper.server_tick(),
+            ?hits,
+            "rollback-chain-repro: phase 1 attempt complete"
+        );
+
+        if hits.len() > phase_1_start_len {
+            break;
+        }
+    }
+
+    let hits_after_phase_1 = stepper
+        .client_app()
+        .world()
+        .resource::<RollbackProbe>()
+        .hits
+        .clone();
+
+    assert!(
+        hits_after_phase_1.len() > phase_1_start_len,
+        "expected phase 1 helper mutation to cause unchanged-entity rollback; \
+         hits_after_phase_1={hits_after_phase_1:?}"
+    );
+
+    let (first_local_tick, first_rollback_tick) = hits_after_phase_1[phase_1_start_len];
+
+    info!(
+        ?first_local_tick,
+        ?first_rollback_tick,
+        ?hits_after_phase_1,
+        "rollback-chain-repro: phase 1 unchanged rollback observed"
+    );
+
+    // Phase 2: mutate the actual predicted server entity. This should go
+    // through Replicon receive/write_history on the client. If the confirmed
+    // value mismatches prediction history, write_history records a mismatch,
+    // and a later rollback check consumes it as confirmed_update.
+    {
+        let mut server_entity = stepper
+            .server_app
+            .world_mut()
+            .entity_mut(server_predicted_entity);
+        server_entity.get_mut::<CompFull>().unwrap().0 = 1234.0;
+    }
+
+    info!(
+        server_tick = ?stepper.server_tick(),
+        client_tick = ?stepper.client_tick(0),
+        ?first_local_tick,
+        ?first_rollback_tick,
+        "rollback-chain-repro: phase 2 predicted server entity mutation applied"
+    );
+
+    let phase_2_start_len = stepper
+        .client_app()
+        .world()
+        .resource::<RollbackProbe>()
+        .hits
+        .len();
+
+    for attempt in 1..=8 {
+        let before_client_tick = stepper.client_tick(0);
+        let before_server_tick = stepper.server_tick();
+
+        info!(
+            attempt,
+            ?before_client_tick,
+            ?before_server_tick,
+            "rollback-chain-repro: running server-first frame for phase 2 confirmed-update rollback"
+        );
+
+        stepper.frame_step_server_first(1);
+
+        log_client_state(
+            "after phase 2 server-first attempt",
+            &mut stepper,
+            predicted,
+        );
+
+        let hits = stepper
+            .client_app()
+            .world()
+            .resource::<RollbackProbe>()
+            .hits
+            .clone();
+
+        info!(
+            attempt,
+            before_client_tick = ?before_client_tick,
+            after_client_tick = ?stepper.client_tick(0),
+            before_server_tick = ?before_server_tick,
+            after_server_tick = ?stepper.server_tick(),
+            ?hits,
+            "rollback-chain-repro: phase 2 attempt complete"
+        );
+
+        if hits.len() > phase_2_start_len {
+            break;
+        }
+    }
+
+    let final_hits = stepper
+        .client_app()
+        .world()
+        .resource::<RollbackProbe>()
+        .hits
+        .clone();
+
+    assert!(
+        final_hits.len() > phase_2_start_len,
+        "expected phase 2 predicted server mutation to produce confirmed-update rollback via real write_history path; \
+         final_hits={final_hits:?}. \
+         If this fails, the mutation did not reach PredictionRegistry::write_history as a mismatch-producing update."
+    );
+
+    let (second_local_tick, second_rollback_tick) = final_hits[phase_2_start_len];
+
+    info!(
+        ?final_hits,
+        ?first_local_tick,
+        ?first_rollback_tick,
+        ?second_local_tick,
+        ?second_rollback_tick,
+        "rollback-chain-repro: observed real unchanged_entity -> real confirmed_update rollback sequence"
+    );
+
+    assert!(
+        second_local_tick >= first_local_tick,
+        "second rollback should not occur before first rollback; final_hits={final_hits:?}"
+    );
+
+    // Diagnostic only. The real-replication path may use a later rollback tick
+    // because this harness lets normal server frames pass.
+    if second_rollback_tick != first_rollback_tick {
+        info!(
+            ?first_rollback_tick,
+            ?second_rollback_tick,
+            "rollback-chain-repro: phase 2 rollback tick differs from phase 1 rollback tick"
+        );
+    }
+
+    if second_local_tick != first_local_tick {
+        info!(
+            ?first_local_tick,
+            ?second_local_tick,
+            "rollback-chain-repro: phase 2 occurred on a later local tick; same-tick reproduction is covered by the ignored diagnostic"
+        );
+    }
 }
