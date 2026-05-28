@@ -5,32 +5,43 @@
 //! - applying inputs to the locally predicted player (for prediction to work, inputs have to be applied to both the
 //!   predicted entity and the server entity)
 
-use crate::automation::{self, AutomationClientPlugin};
+use crate::automation::AutomationClientPlugin;
 use crate::protocol::*;
 use crate::shared;
 use bevy::prelude::*;
-use lightyear::prelude::client::input::*;
+use lightyear::connection::host::HostServer;
+use lightyear::input::bei::prelude::{Action, ActionOf, Fire};
 use lightyear::prelude::client::{InputDelayConfig, InputTimelineConfig};
-use lightyear::prelude::input::native::*;
+use lightyear::prelude::input::bei::InputMarker;
 use lightyear::prelude::*;
+use lightyear_frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
+use bevy::ecs::relationship::Relationship;
 
 pub struct ExampleClientPlugin;
 
 impl Plugin for ExampleClientPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(AutomationClientPlugin);
+        app.add_plugins(FrameInterpolationPlugin::<PlayerPosition>::default());
         app.add_systems(Startup, configure_input_delay);
-        app.add_systems(
-            FixedPreUpdate,
-            // Inputs have to be buffered in the WriteClientInputs set
-            buffer_input.in_set(InputSystems::WriteClientInputs),
-        );
-        app.add_systems(FixedUpdate, player_movement);
-
+        app.add_systems(FixedUpdate, integrate_player_movement);
         app.add_systems(Update, receive_message1);
         app.add_observer(handle_predicted_spawn);
         app.add_observer(handle_controlled_spawn);
         app.add_observer(handle_interpolated_spawn);
+        app.add_observer(player_movement);
+    }
+}
+
+fn integrate_player_movement(
+    synced_client: Query<(), (With<Client>, With<IsSynced<InputTimeline>>)>,
+    mut players: Query<(&mut PlayerPosition, &mut PlayerVelocity), With<Predicted>>,
+) {
+    if synced_client.is_empty() {
+        return;
+    }
+    for (position, velocity) in &mut players {
+        shared::integrate_player_velocity(position, velocity);
     }
 }
 
@@ -40,71 +51,24 @@ fn configure_input_delay(client: Single<Entity, With<Client>>, mut commands: Com
     );
 }
 
-/// System that reads from peripherals and adds inputs to the buffer
-/// This system must be run in the `InputSystemSet::BufferInputs` set in the `FixedPreUpdate` schedule
-/// to work correctly.
-///
-/// I would also advise to use the `leafwing` feature to use the `LeafwingInputPlugin` instead of the
-/// `InputPlugin`, which contains more features.
-fn buffer_input(
-    timeline: Res<LocalTimeline>,
-    mut query: Query<&mut ActionState<Inputs>, With<InputMarker<Inputs>>>,
-    automation: Option<Res<automation::client::AutomationSettings>>,
-    keypress: Option<Res<ButtonInput<KeyCode>>>,
-) {
-    if let Ok(mut action_state) = query.single_mut() {
-        let current_tick = timeline.tick();
-        let mut direction =
-            automation::client::direction_override(automation, current_tick).unwrap_or_default();
-
-        if direction.is_none() {
-            if let Some(keypress) = keypress {
-                if keypress.pressed(KeyCode::KeyW) || keypress.pressed(KeyCode::ArrowUp) {
-                    direction.up = true;
-                }
-                if keypress.pressed(KeyCode::KeyS) || keypress.pressed(KeyCode::ArrowDown) {
-                    direction.down = true;
-                }
-                if keypress.pressed(KeyCode::KeyA) || keypress.pressed(KeyCode::ArrowLeft) {
-                    direction.left = true;
-                }
-                if keypress.pressed(KeyCode::KeyD) || keypress.pressed(KeyCode::ArrowRight) {
-                    direction.right = true;
-                }
-            }
-        }
-        // we always set the value. Setting it to None means that the input was missing, it's not the same
-        // as saying that the input was 'no keys pressed'
-        action_state.0 = Inputs::Direction(direction);
-        trace!(
-            target: "lightyear_debug::simple_box",
-            kind = "simple_box_client_input",
-            schedule = "FixedPreUpdate",
-            sample_point = "FixedPreUpdate",
-            local_tick = current_tick.0,
-            input = ?action_state.0,
-            "selected simple_box client input"
-        );
-    }
-}
-
 /// The client input only gets applied to predicted entities that we own
 /// This works because we only predict the user's controlled entity.
 /// If we were predicting more entities, we would have to only apply movement to the player owned one.
 fn player_movement(
+    trigger: On<Fire<MovePlayer>>,
     synced_client: Query<(), (With<Client>, With<IsSynced<InputTimeline>>)>,
-    // timeline: Single<&LocalTimeline>,
-    mut position_query: Query<(&mut PlayerPosition, &ActionState<Inputs>), With<Predicted>>,
+    host_server: Query<(), With<HostServer>>,
+    server_actions: Query<(), (With<Action<MovePlayer>>, With<Replicate>)>,
+    mut velocity_query: Query<&mut PlayerVelocity, With<Predicted>>,
 ) {
     if synced_client.is_empty() {
         return;
     }
-    // let tick = timeline.tick();
-    for (position, input) in position_query.iter_mut() {
-        // trace!(?tick, ?position, ?input, "client");
-        // NOTE: be careful to directly pass Mut<PlayerPosition>
-        // getting a mutable reference triggers change detection, unless you use `as_deref_mut()`
-        shared::shared_movement_behaviour(position, input);
+    if !host_server.is_empty() && server_actions.contains(trigger.action) {
+        return;
+    }
+    if let Ok(velocity) = velocity_query.get_mut(trigger.context) {
+        shared::apply_player_input(velocity, trigger.value);
     }
 }
 
@@ -125,6 +89,7 @@ pub(crate) fn receive_message1(mut receiver: Single<&mut MessageReceiver<Message
 pub(crate) fn handle_predicted_spawn(
     trigger: On<Add, (PlayerId, Predicted)>,
     mut predicted: Query<&mut PlayerColor, With<Predicted>>,
+    mut commands: Commands,
 ) {
     let entity = trigger.entity;
     if let Ok(mut color) = predicted.get_mut(entity) {
@@ -133,17 +98,21 @@ pub(crate) fn handle_predicted_spawn(
             ..Hsva::from(color.0)
         };
         color.0 = Color::from(hsva);
+        commands
+            .entity(entity)
+            .insert(FrameInterpolate::<PlayerPosition>::default());
     }
 }
 
 fn handle_controlled_spawn(
     trigger: On<Add, Controlled>,
-    mut commands: Commands,
-    players: Query<(&PlayerId, Option<&ControlledBy>), Without<InputMarker<Inputs>>>,
+    players: Query<(&PlayerId, Has<InputMarker<Player>>, Option<&ControlledBy>), With<Player>>,
     clients: Query<(), With<Client>>,
+    actions: Query<&ActionOf<Player>, With<Action<MovePlayer>>>,
+    mut commands: Commands,
 ) {
     let entity = trigger.entity;
-    let Ok((player_id, controlled_by)) = players.get(entity) else {
+    let Ok((player_id, has_input_marker, controlled_by)) = players.get(entity) else {
         return;
     };
     if let Some(controlled_by) = controlled_by {
@@ -151,10 +120,15 @@ fn handle_controlled_spawn(
             return;
         }
     }
-    info!("Adding InputMarker to controlled player {entity:?} {player_id:?}");
+    if has_input_marker {
+        return;
+    }
     commands
         .entity(entity)
-        .insert(InputMarker::<Inputs>::default());
+        .insert(InputMarker::<Player>::default());
+    if !actions.iter().any(|action_of| action_of.get() == entity) {
+        shared::spawn_action_entities(&mut commands, entity, player_id.0, false);
+    }
 }
 
 /// When the predicted copy of the client-owned entity is spawned, do stuff

@@ -8,6 +8,7 @@
 use bevy::ecs::entity::MapEntities;
 use bevy::math::Curve;
 use bevy::prelude::*;
+use lightyear::prelude::input::bei::*;
 use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) struct PlayerBundle {
     id: PlayerId,
     position: PlayerPosition,
+    velocity: PlayerVelocity,
     color: PlayerColor,
 }
 
@@ -29,6 +31,7 @@ impl PlayerBundle {
         Self {
             id: PlayerId(id),
             position: PlayerPosition(position),
+            velocity: PlayerVelocity(Vec2::ZERO),
             color: PlayerColor(color),
         }
     }
@@ -37,10 +40,13 @@ impl PlayerBundle {
 // Components
 
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct PlayerId(PeerId);
+pub struct PlayerId(pub PeerId);
 
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Deref, DerefMut)]
 pub struct PlayerPosition(pub Vec2);
+
+#[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Deref, DerefMut)]
+pub struct PlayerVelocity(pub Vec2);
 
 impl Ease for PlayerPosition {
     fn interpolating_curve_unbounded(start: Self, end: Self) -> impl Curve<Self> {
@@ -52,6 +58,10 @@ impl Ease for PlayerPosition {
 
 #[derive(Component, Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct PlayerColor(pub(crate) Color);
+
+// Input context
+#[derive(Component, Serialize, Deserialize, Reflect, Clone, Debug, PartialEq)]
+pub struct Player;
 
 // Example of a component that contains an entity.
 // This component, when replicated, needs to have the inner entity mapped from the Server world
@@ -76,6 +86,9 @@ pub struct Channel1;
 pub struct Message1(pub usize);
 
 // Inputs
+#[derive(Debug, InputAction)]
+#[action_output(Vec2)]
+pub struct MovePlayer;
 
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq, Clone, Reflect)]
 pub struct Direction {
@@ -117,13 +130,16 @@ impl Plugin for ProtocolPlugin {
             .add_direction(NetworkDirection::ServerToClient);
 
         // inputs
-        app.add_plugins(input::native::InputPlugin::<Inputs>::default());
+        app.add_plugins(InputPlugin::<Player>::default());
+        app.register_input_action::<MovePlayer>();
         // components
         app.register_component::<PlayerId>();
 
         app.register_component::<PlayerPosition>()
             .add_prediction()
+            //.add_linear_correction_fn()
             .add_linear_interpolation();
+        app.register_component::<PlayerVelocity>().add_prediction();
 
         app.register_component::<PlayerColor>();
 

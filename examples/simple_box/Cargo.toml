@@ -37,7 +37,10 @@ lightyear = { "workspace" = true, features = [
   "prediction",
   "replication",
   "input_native",
+  "input_bei",
 ] }
+bevy_enhanced_input.workspace = true
+lightyear_frame_interpolation.workspace = true
 lightyear_examples_common = { workspace = true, features = [
   "structured-debug",
 ] }
