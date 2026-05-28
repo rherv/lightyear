@@ -5,6 +5,7 @@
 use crate::protocol::*;
 use bevy::prelude::*;
 use lightyear::input::bei::prelude::{Action, ActionOf, Bindings, Cardinal};
+use lightyear::prelude::{NetworkTarget, PeerId, PreSpawned, Replicate};
 use lightyear_examples_common::shared::SharedSettings;
 
 pub struct SharedPlugin;

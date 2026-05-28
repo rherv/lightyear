@@ -40,7 +40,7 @@ impl PlayerBundle {
 // Components
 
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct PlayerId(PeerId);
+pub struct PlayerId(pub PeerId);
 
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect, Deref, DerefMut)]
 pub struct PlayerPosition(pub Vec2);
@@ -137,6 +137,7 @@ impl Plugin for ProtocolPlugin {
 
         app.register_component::<PlayerPosition>()
             .add_prediction()
+            //.add_linear_correction_fn()
             .add_linear_interpolation();
         app.register_component::<PlayerVelocity>().add_prediction();
 

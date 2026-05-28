@@ -37,7 +37,7 @@ mod shared;
 fn main() {
     let cli = Cli::default();
 
-    let mut app = cli.build_app(Duration::from_secs_f64(1.0 / FIXED_TIMESTEP_HZ), true);
+    let mut app = cli.build_app(Duration::from_secs_f64(1.0 / 10.0), true);
 
     app.add_plugins(SharedPlugin);
 

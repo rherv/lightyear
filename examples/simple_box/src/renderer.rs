@@ -7,7 +7,11 @@ pub struct ExampleRendererPlugin;
 impl Plugin for ExampleRendererPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, init);
-        app.add_systems(Update, draw_boxes);
+        app.add_systems(
+            PostUpdate,
+            draw_boxes
+                .after(TransformSystems::Propagate)
+        );
     }
 }
 

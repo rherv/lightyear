@@ -15,6 +15,7 @@ use lightyear::prelude::client::{InputDelayConfig, InputTimelineConfig};
 use lightyear::prelude::input::bei::InputMarker;
 use lightyear::prelude::*;
 use lightyear_frame_interpolation::{FrameInterpolate, FrameInterpolationPlugin};
+use bevy::ecs::relationship::Relationship;
 
 pub struct ExampleClientPlugin;
 
