@@ -8,9 +8,9 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 use lightyear_examples_common::shared::SEND_INTERVAL;
 
-const GRID_SIZE: f32 = 200.0;
-const NUM_CIRCLES: i32 = 1;
-const INTEREST_RADIUS: f32 = 150.0;
+const GRID_SIZE: f32 = 5.0;
+const NUM_CIRCLES: i32 = 100;
+const INTEREST_RADIUS: f32 = 500.0;
 
 // Plugin for server-specific logic
 pub struct ExampleServerPlugin;
@@ -18,7 +18,7 @@ pub struct ExampleServerPlugin;
 impl Plugin for ExampleServerPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(AutomationServerPlugin);
-        app.add_plugins(RoomPlugin);
+        // app.add_plugins(RoomPlugin);
         app.insert_resource(ReplicationMetadata::new(SEND_INTERVAL));
         app.add_systems(Startup, init);
         // the physics/FixedUpdates systems that consume inputs should be run in this set
@@ -28,8 +28,8 @@ impl Plugin for ExampleServerPlugin {
         app.add_systems(Update, interest_management);
 
         // Allocate a room for the player entities
-        let player_room = app.world_mut().resource_mut::<RoomAllocator>().allocate();
-        app.insert_resource(PlayerRoom(player_room));
+        //let player_room = app.world_mut().resource_mut::<RoomAllocator>().allocate();
+        //app.insert_resource(PlayerRoom(player_room));
     }
 }
 
@@ -52,7 +52,6 @@ pub(crate) fn handle_new_client(trigger: On<Add, LinkOf>, mut commands: Commands
 /// DDoS attempt, etc.). We want to start the replication only when the client is confirmed as connected.
 pub(crate) fn handle_connected(
     trigger: On<Add, Connected>,
-    player_room: Res<PlayerRoom>,
     query: Query<&RemoteId, With<ClientOf>>,
     mut commands: Commands,
 ) {
@@ -74,7 +73,7 @@ pub(crate) fn handle_connected(
                 lifetime: Default::default(),
             },
             // Add the player entity to the player room for room-based visibility
-            Rooms::single(player_room.0),
+            // Rooms::single(player_room.0),
         ))
         .id();
     info!(
@@ -82,10 +81,12 @@ pub(crate) fn handle_connected(
         player_entity, client_id
     );
 
+    /*
     // Add the sender (client connection) to the same room so it can see all player entities
     commands
         .entity(trigger.entity)
         .insert(Rooms::single(player_room.0));
+     */
 }
 
 pub(crate) fn init(mut commands: Commands) {
